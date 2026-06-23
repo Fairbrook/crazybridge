@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/crazybridge.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/crazybridge.launch.py', 'launch/crazyoptitrack.launch.py']),
         ('share/' + package_name + '/config', ['config/pid.conf']),
     ],
     install_requires=['setuptools', 'cflib', 'textual', 'rerun-sdk'],

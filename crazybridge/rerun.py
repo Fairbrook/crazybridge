@@ -31,17 +31,34 @@ class Rerun(Node):
         self.create_subscription(Quaternion, 'orientation/error', self._qe_cb, 1)
         self.create_subscription(Odometry, 'odometry', self._odometry_cb, 1)
 
+    @staticmethod
+    def _normalize_quat(q: Quaternion) -> tuple[float, float, float, float]:
+        """Return (x, y, z, w) as a unit quaternion.
+
+        The Crazyflie estimator occasionally emits quaternions that are not
+        quite unit-length (e.g. right after connect, before the filter has
+        settled). Normalizing here keeps the rerun plots and the heading arrow
+        well-defined. Falls back to identity when the norm is degenerate.
+        """
+        x, y, z, w = q.x, q.y, q.z, q.w
+        norm = np.sqrt(x * x + y * y + z * z + w * w)
+        if norm < 1e-9:
+            return 0.0, 0.0, 0.0, 1.0
+        return x / norm, y / norm, z / norm, w / norm
+
     def _qd_cb(self, msg: Quaternion):
-        rr.log("/orientation/desired/w", rr.Scalars(msg.w))
-        rr.log("/orientation/desired/x", rr.Scalars(msg.x))
-        rr.log("/orientation/desired/y", rr.Scalars(msg.y))
-        rr.log("/orientation/desired/z", rr.Scalars(msg.z))
+        x, y, z, w = self._normalize_quat(msg)
+        rr.log("/orientation/desired/w", rr.Scalars(w))
+        rr.log("/orientation/desired/x", rr.Scalars(x))
+        rr.log("/orientation/desired/y", rr.Scalars(y))
+        rr.log("/orientation/desired/z", rr.Scalars(z))
 
     def _qe_cb(self, msg: Quaternion):
-        rr.log("/orientation/error/w", rr.Scalars(msg.w))
-        rr.log("/orientation/error/x", rr.Scalars(msg.x))
-        rr.log("/orientation/error/y", rr.Scalars(msg.y))
-        rr.log("/orientation/error/z", rr.Scalars(msg.z))
+        x, y, z, w = self._normalize_quat(msg)
+        rr.log("/orientation/error/w", rr.Scalars(w))
+        rr.log("/orientation/error/x", rr.Scalars(x))
+        rr.log("/orientation/error/y", rr.Scalars(y))
+        rr.log("/orientation/error/z", rr.Scalars(z))
 
     def _thrust_cb(self, msg: Float32):
         rr.log("/input/thrust", rr.Scalars(msg.data))
@@ -61,7 +78,8 @@ class Rerun(Node):
         poseWC: PoseWithCovariance = msg.pose
         pose: Pose = poseWC.pose
         q: Quaternion = pose.orientation
-        rot: Rotation = Rotation.from_quat([q.x, q.y, q.z, q.w])
+        x, y, z, w = self._normalize_quat(q)
+        rot: Rotation = Rotation.from_quat([x, y, z, w])
         p: Point = pose.position
         start = [p.x, p.y, p.z]
         # Arrow vector is a displacement from the origin, so rotate the drone's
@@ -70,10 +88,10 @@ class Rerun(Node):
         arrow_length = 2.0
         vector = rot.apply([1.0, 0.0, 0.0]) * arrow_length
         rr.log("drone", rr.Arrows3D(origins=[start], vectors=[vector], radii=[0.05]))
-        rr.log("/orientation/w", rr.Scalars(q.w))
-        rr.log("/orientation/x", rr.Scalars(q.x))
-        rr.log("/orientation/y", rr.Scalars(q.y))
-        rr.log("/orientation/z", rr.Scalars(q.z))
+        rr.log("/orientation/w", rr.Scalars(w))
+        rr.log("/orientation/x", rr.Scalars(x))
+        rr.log("/orientation/y", rr.Scalars(y))
+        rr.log("/orientation/z", rr.Scalars(z))
 
     def _init_orientation_logs(self):
         rr.log(

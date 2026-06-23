@@ -15,6 +15,7 @@ import threading
 import rclpy
 from time import sleep
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 import cflib.crtp
 from cflib.crazyflie import Crazyflie
@@ -24,7 +25,7 @@ from logging import getLogger
 from ament_index_python.packages import get_package_share_directory
 
 from std_msgs.msg import Float32
-from geometry_msgs.msg import PointStamped, Vector3, Quaternion
+from geometry_msgs.msg import PointStamped, Vector3, Quaternion, PointStamped, Point
 from nav_msgs.msg import Odometry
 
 from crazybridge_interfaces.srv import GoTo, Land, Takeoff
@@ -104,7 +105,8 @@ class CrazyBridge(Node):
         self._qd_pub = self.create_publisher(Quaternion, 'orientation/desired', 1)
         self._qe_pub = self.create_publisher(Quaternion, 'orientation/error', 1)
         self._marker_sub = self.create_subscription(
-            PointStamped, 'optitrack/marker', self._marker_cb, 10
+            PointStamped, 'optitrack/marker', self._marker_cb,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         )
 
         self._takeoff_srv = self.create_service(
@@ -186,8 +188,8 @@ class CrazyBridge(Node):
                 )
         try:
             self._cf.param.set_value(PARAM_HL_COMMANDER, 1)
-            self._cf.param.set_value(PARAM_CONTROLLER, 5) # Add constats for the controller oot = 5 and auto = 0
-        #    self._cf.param.set_value(PARAM_ESTIMATOR, ESTIMATOR_KALMAN)
+#            self._cf.param.set_value(PARAM_CONTROLLER, 5) # Add constats for the controller oot = 5 and auto = 0
+            self._cf.param.set_value(PARAM_ESTIMATOR, ESTIMATOR_KALMAN)
         except Exception as exc:
             self.get_logger().error(f'Failed to set startup params: {exc}')
 
@@ -334,8 +336,10 @@ class CrazyBridge(Node):
     def _on_disconnected(self, link_uri: str) -> None:
         self.get_logger().info(f'Disconnected from {link_uri}')
 
-    def _marker_cb(self, msg)->None:
-        print(msg)
+    def _marker_cb(self, msg: PointStamped)->None:
+        point: Point = msg.point
+        if self._cf.connected:
+            self._cf.extpos.send_extpos(point.x, point.y, point.z)
 
     def _on_connection_failed(self, link_uri: str, msg: str) -> None:
         self._connect_error = msg
@@ -357,13 +361,14 @@ class CrazyBridge(Node):
 
     def _on_q_log(self, _timestamp, data, _logconf) -> None:
         # Bitcraze kalman logs (q0, q1, q2, q3) as (w, x, y, z).
+        x, y, z, w = self._normalize_quat(
+            float(data['kalman.q1']),
+            float(data['kalman.q2']),
+            float(data['kalman.q3']),
+            float(data['kalman.q0']),
+        )
         with self._pos_lock:
-            self._quat = [
-                float(data['kalman.q1']),
-                float(data['kalman.q2']),
-                float(data['kalman.q3']),
-                float(data['kalman.q0']),
-            ]
+            self._quat = [x, y, z, w]
         self._publish_odom()
 
     def _on_pos_err_log(self, _timestamp, data, _logconf) -> None:
@@ -382,7 +387,7 @@ class CrazyBridge(Node):
         self._trans_error_pub.publish(msg)
 
     def _on_q_err_log(self, _timestamp, data, _logconf) -> None:
-        v = (
+        v = self._normalize_quat(
             float(data['oot.q_err_x']),
             float(data['oot.q_err_y']),
             float(data['oot.q_err_z']),
@@ -398,7 +403,7 @@ class CrazyBridge(Node):
         self._qe_pub.publish(msg)
 
     def _on_qd_log(self, _timestamp, data, _logconf) -> None:
-        v = (
+        v = self._normalize_quat(
             float(data['oot.qd_x']),
             float(data['oot.qd_y']),
             float(data['oot.qd_z']),
@@ -438,6 +443,20 @@ class CrazyBridge(Node):
         self._odom_pub.publish(msg)
 
     @staticmethod
+    def _normalize_quat(x: float, y: float, z: float, w: float) -> tuple[float, float, float, float]:
+        """Return (x, y, z, w) as a unit quaternion.
+
+        The Crazyflie estimator occasionally emits quaternions that are not
+        quite unit-length (e.g. right after connect, before the filter has
+        settled), so we normalize before publishing to ROS. Falls back to
+        identity when the norm is degenerate.
+        """
+        norm = math.sqrt(x * x + y * y + z * z + w * w)
+        if norm < 1e-9:
+            return 0.0, 0.0, 0.0, 1.0
+        return x / norm, y / norm, z / norm, w / norm
+
+    @staticmethod
     def _duration_to_seconds(duration) -> float:
         return float(duration.sec) + float(duration.nanosec) * 1e-9
 
@@ -454,8 +473,8 @@ class CrazyBridge(Node):
                             float(request.height),
                             duration
             )
-            sleep(duration * 0.75)
-            self._cf.high_level_commander.go_to(1, 1, 2, 0, 3)
+#            sleep(duration * 0.75)
+#            self._cf.high_level_commander.go_to(1, 1, 2, 0, 3)
             response.success = True
             response.message = ''
         except Exception as exc:
