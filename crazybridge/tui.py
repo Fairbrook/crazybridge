@@ -27,6 +27,7 @@ from rclpy.executors import MultiThreadedExecutor
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import Point
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Float32
 
 from crazybridge_interfaces.srv import GoTo, Land, Takeoff
 
@@ -48,6 +49,7 @@ class BridgeClient(Node):
         super().__init__('crazybridge_tui')
 
         self.declare_parameter('odom_topic', '/crazybridge/odometry')
+        self.declare_parameter('battery_topic', '/crazybridge/battery')
         self.declare_parameter('takeoff_srv', '/crazybridge/takeoff')
         self.declare_parameter('land_srv', '/crazybridge/land')
         self.declare_parameter('goto_srv', '/crazybridge/go_to')
@@ -61,6 +63,8 @@ class BridgeClient(Node):
 
         odom_topic = self._sp('odom_topic')
         self.create_subscription(Odometry, odom_topic, self._odom_cb, 10)
+        batt_topic = self._sp('battery_topic')
+        self.create_subscription(Float32, batt_topic, self._batt_cb, 10)
 
         self._takeoff_cli = self.create_client(Takeoff, self._sp('takeoff_srv'))
         self._land_cli = self.create_client(Land, self._sp('land_srv'))
@@ -68,6 +72,7 @@ class BridgeClient(Node):
 
         self._state_lock = threading.Lock()
         self._latest_odom: Odometry | None = None
+        self._latest_batt: float | None = None
         self.events: Queue[str] = Queue()
 
     def _sp(self, name: str) -> str:
@@ -82,7 +87,7 @@ class BridgeClient(Node):
 
     def snapshot(self) -> Odometry | None:
         with self._state_lock:
-            return self._latest_odom
+            return (self._latest_odom, self._latest_batt)
 
     def service_status(self) -> dict[str, bool]:
         return {
@@ -100,6 +105,10 @@ class BridgeClient(Node):
             )
         except Exception as exc:
             self.events.put(f'{label} -> exception: {exc}')
+
+    def _batt_cb(self, msg: Float32):
+        with self._state_lock:
+            self._latest_batt = msg.data
 
     def call_takeoff(self) -> None:
         if not self._takeoff_cli.service_is_ready():
@@ -205,7 +214,7 @@ class CrazyBridgeTUI(App):
 
     def _refresh(self) -> None:
         self._drain_events()
-        odom = self._client.snapshot()
+        (odom, batt) = self._client.snapshot()
         svc = self._client.service_status()
         svc_line = '  '.join(
             f'{k}={"OK" if v else "--"}' for k, v in svc.items()
@@ -228,6 +237,10 @@ class CrazyBridgeTUI(App):
                 f'step={self._client.step:.2f}m  yaw_step={self._client.yaw_step:.1f}deg\n'
                 f'services: {svc_line}\n'
             )
+
+        if batt is not None:
+            body += f'battery={batt:.1f}%\n'
+
         self.query_one('#status', Static).update(body)
         self.query_one('#log', Static).update('\n'.join(self._log))
 

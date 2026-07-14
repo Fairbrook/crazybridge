@@ -41,8 +41,10 @@ ESTIMATOR_COMPLEMENTARY = 1
 OOT_PARAM_GROUP = 'ootParams'
 OOT_TRANS_KP = ('trans_kp_x', 'trans_kp_y', 'trans_kp_z')
 OOT_TRANS_KD = ('trans_kd_x', 'trans_kd_y', 'trans_kd_z')
+OOT_TRANS_KI = ('trans_ki_x', 'trans_ki_y', 'trans_ki_z')
 OOT_ROT_KP = ('rot_kp_x', 'rot_kp_y', 'rot_kp_z')
 OOT_ROT_KD = ('rot_kd_x', 'rot_kd_y', 'rot_kd_z')
+OOT_ROT_KI = ('rot_ki_x', 'rot_ki_y', 'rot_ki_z')
 
 
 class CrazyBridge(Node):
@@ -98,12 +100,15 @@ class CrazyBridge(Node):
         self._oot_q_err = (0.0, 0.0, 0.0, 1.0)  # (x, y, z, w)
         self._oot_qd = (0.0, 0.0, 0.0, 1.0)     # (x, y, z, w)
 
-        self._odom_pub = self.create_publisher(Odometry, 'odometry', 1)
+        self._odom_pub = self.create_publisher(Odometry, '~/odometry', 1)
+        self._batt_pub = self.create_publisher(Float32, '~/battery', 1)
         self._thrust_pub = self.create_publisher(Float32, 'thrust', 1)
         self.torque_pub = self.create_publisher(Vector3, 'torque', 1)
         self._trans_error_pub = self.create_publisher(Vector3, 'pos_error', 1)
-        self._qd_pub = self.create_publisher(Quaternion, 'orientation/desired', 1)
-        self._qe_pub = self.create_publisher(Quaternion, 'orientation/error', 1)
+        self._qd_pub = self.create_publisher(
+            Quaternion, 'orientation/desired', 1)
+        self._qe_pub = self.create_publisher(
+            Quaternion, 'orientation/error', 1)
         self._marker_sub = self.create_subscription(
             PointStamped, 'optitrack/marker', self._marker_cb,
             QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -127,7 +132,6 @@ class CrazyBridge(Node):
         self._cf.connection_failed.add_callback(self._on_connection_failed)
         self._cf.connection_lost.add_callback(self._on_connection_lost)
         self._cf.console.receivedChar.add_callback(self._on_console)
-
 
         self.get_logger().info(f'Opening link to {self._uri}')
         self._cf.open_link(self._uri)
@@ -184,15 +188,13 @@ class CrazyBridge(Node):
                 self._apply_pid_conf(self._pid_conf_path)
             except Exception as exc:
                 self.get_logger().error(
-                    f'Failed to load pid.conf from {self._pid_conf_path}: {exc}'
-                )
+                    f'Failed to load pid.conf from {self._pid_conf_path}: {exc}')  # noqa
         try:
             self._cf.param.set_value(PARAM_HL_COMMANDER, 1)
 #            self._cf.param.set_value(PARAM_CONTROLLER, 5) # Add constats for the controller oot = 5 and auto = 0
             self._cf.param.set_value(PARAM_ESTIMATOR, ESTIMATOR_KALMAN)
         except Exception as exc:
             self.get_logger().error(f'Failed to set startup params: {exc}')
-
 
         self._pos_log = LogConfig(
             name='kalman_pos', period_in_ms=self._log_period_ms)
@@ -207,13 +209,20 @@ class CrazyBridge(Node):
         self._q_log.add_variable('kalman.q2', 'float')
         self._q_log.add_variable('kalman.q3', 'float')
 
+        extra_period = self._sanitise_log_period(500, "extra_log_ms")
+        self._pm_log = LogConfig(name="battery", period_in_ms=extra_period)
+        self._pm_log.add_variable("pm.batteryLevel", "uint8_t")
+
         try:
             self._cf.log.add_config(self._pos_log)
             self._cf.log.add_config(self._q_log)
+            self._cf.log.add_config(self._pm_log)
             self._pos_log.data_received_cb.add_callback(self._on_pos_log)
             self._q_log.data_received_cb.add_callback(self._on_q_log)
+            self._pm_log.data_received_cb.add_callback(self._on_pm_log)
             self._pos_log.start()
             self._q_log.start()
+            self._pm_log.start()
         except Exception as exc:
             self.get_logger().error(f'Failed to register log blocks: {exc}')
 
@@ -276,13 +285,19 @@ class CrazyBridge(Node):
             self._ang_vel_err_log.start()
             self.get_logger().info('OOT log blocks started')
         except Exception as exc:
-            self.get_logger().error(f'Failed to register OOT log blocks: {exc}')
+            self.get_logger().error(
+                f'Failed to register OOT log blocks: {exc}')
 
-    def _on_input_log(self,_timestamp, data, _logconf):
+    def _on_pm_log(self, _timestamp, data, _logconf):
+        batt_msg = Float32()
+        batt_msg.data = float(data["pm.batteryLevel"])
+        self._batt_pub.publish(batt_msg)
+
+    def _on_input_log(self, _timestamp, data, _logconf):
         thrust_msg = Float32()
-        thrust_msg.data = float(data["oot.thrust"]) 
+        thrust_msg.data = float(data["oot.thrust"])
         self._thrust_pub.publish(thrust_msg)
-        
+
         torque_msg = Vector3()
         torque_msg.x = float(data["oot.torque_x"])
         torque_msg.y = float(data["oot.torque_y"])
@@ -308,12 +323,18 @@ class CrazyBridge(Node):
 
         trans_kp = values[0:3]
         trans_kd = values[3:6]
-        rot_kp = values[6:9]
-        rot_kd = values[9:12]
+        trans_ki = values[6:9]
+        trans_h = values[9:12]
+        rot_kp = values[12:15]
+        rot_kd = values[15:18]
+        rot_ki = values[18:21]
+        rot_h = values[21:24]
 
         self.get_logger().info(f'Loading PID gains from {path}')
-        self.get_logger().info(f'  trans kp = {trans_kp}, kd = {trans_kd}')
-        self.get_logger().info(f'  rot   kp = {rot_kp}, kd = {rot_kd}')
+        self.get_logger().info(f'  trans kp = {trans_kp}, kd = {trans_kd}, ki = {trans_ki}')  # noqa
+        self.get_logger().info(f'  trans homogenous   emax = {trans_h[0]} mu = {trans_h[1]} gamma = {trans_h[2]}')  # noqa
+        self.get_logger().info(f'  rot   kp = {rot_kp}, kd = {rot_kd}, ki = {rot_ki}')  # noqa
+        self.get_logger().info(f'  rot homogenous   emax = {rot_h[0]} mu = {rot_h[1]} gamma = {rot_h[2]}')  # noqa
 
         self._cf.param.set_value("ootParams.trans_kp_x", trans_kp[0])
         self._cf.param.set_value("ootParams.trans_kp_y", trans_kp[1])
@@ -323,6 +344,14 @@ class CrazyBridge(Node):
         self._cf.param.set_value("ootParams.trans_kd_y", trans_kd[1])
         self._cf.param.set_value("ootParams.trans_kd_z", trans_kd[2])
 
+        self._cf.param.set_value("ootParams.trans_ki_x", trans_ki[0])
+        self._cf.param.set_value("ootParams.trans_ki_y", trans_ki[1])
+        self._cf.param.set_value("ootParams.trans_ki_z", trans_ki[2])
+
+        self._cf.param.set_value("ootParams.trans_emax", trans_h[0])
+        self._cf.param.set_value("ootParams.trans_mu", trans_h[1])
+        self._cf.param.set_value("ootParams.trans_gamma", trans_h[2])
+
         self._cf.param.set_value("ootParams.rot_kp_x", rot_kp[0])
         self._cf.param.set_value("ootParams.rot_kp_y", rot_kp[1])
         self._cf.param.set_value("ootParams.rot_kp_z", rot_kp[2])
@@ -331,12 +360,20 @@ class CrazyBridge(Node):
         self._cf.param.set_value("ootParams.rot_kd_y", rot_kd[1])
         self._cf.param.set_value("ootParams.rot_kd_z", rot_kd[2])
 
+        self._cf.param.set_value("ootParams.rot_ki_x", rot_ki[0])
+        self._cf.param.set_value("ootParams.rot_ki_y", rot_ki[1])
+        self._cf.param.set_value("ootParams.rot_ki_z", rot_ki[2])
+
+        self._cf.param.set_value("ootParams.rot_emax", rot_h[0])
+        self._cf.param.set_value("ootParams.rot_mu", rot_h[1])
+        self._cf.param.set_value("ootParams.rot_gamma", rot_h[2])
+
         self.get_logger().info('Done configuring PID')
 
     def _on_disconnected(self, link_uri: str) -> None:
         self.get_logger().info(f'Disconnected from {link_uri}')
 
-    def _marker_cb(self, msg: PointStamped)->None:
+    def _marker_cb(self, msg: PointStamped) -> None:
         point: Point = msg.point
         if self._cf.connected:
             self._cf.extpos.send_extpos(point.x, point.y, point.z)
@@ -470,8 +507,8 @@ class CrazyBridge(Node):
         )
         try:
             self._cf.high_level_commander.takeoff(
-                            float(request.height),
-                            duration
+                float(request.height),
+                duration
             )
 #            sleep(duration * 0.75)
 #            self._cf.high_level_commander.go_to(1, 1, 2, 0, 3)

@@ -29,7 +29,7 @@ class Rerun(Node):
         self.create_subscription(Float32, 'thrust', self._thrust_cb, 1)
         self.create_subscription(Quaternion, 'orientation/desired', self._qd_cb, 1)
         self.create_subscription(Quaternion, 'orientation/error', self._qe_cb, 1)
-        self.create_subscription(Odometry, 'odometry', self._odometry_cb, 1)
+        self.create_subscription(Odometry, '/crazybridge/odometry', self._odometry_cb, 1)
 
     @staticmethod
     def _normalize_quat(q: Quaternion) -> tuple[float, float, float, float]:
