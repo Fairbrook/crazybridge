@@ -24,11 +24,12 @@ from logging import getLogger
 
 from ament_index_python.packages import get_package_share_directory
 
-from std_msgs.msg import Float32
+from std_msgs.msg import Float32, Header
+from std_srvs.srv import SetBool
 from geometry_msgs.msg import PointStamped, Vector3, Quaternion, PointStamped, Point
 from nav_msgs.msg import Odometry
 
-from crazybridge_interfaces.srv import GoTo, Land, Takeoff
+from crazybridge_interfaces.srv import GoTo, Land, Spiral, Takeoff
 
 logger = getLogger()
 
@@ -120,6 +121,10 @@ class CrazyBridge(Node):
             Land, '~/land', self._land_cb)
         self._goto_srv = self.create_service(
             GoTo, '~/go_to', self._goto_cb)
+        self._spiral_srv = self.create_service(
+            Spiral, '~/spiral', self._spiral_cb)
+        self._kill_srv = self.create_service(
+            SetBool, '~/kill', self._kill_cb)
 
         cflib.crtp.init_drivers()
         self._connected = threading.Event()
@@ -374,6 +379,7 @@ class CrazyBridge(Node):
         self.get_logger().info(f'Disconnected from {link_uri}')
 
     def _marker_cb(self, msg: PointStamped) -> None:
+        header: Header = msg.header
         point: Point = msg.point
         if self._cf.connected:
             self._cf.extpos.send_extpos(point.x, point.y, point.z)
@@ -520,6 +526,25 @@ class CrazyBridge(Node):
             response.message = str(exc)
         return response
 
+    def _kill_cb(
+        self, request: SetBool.Request, response: SetBool.Response
+    ) -> Land.Response:
+        if not request.data:
+            return 
+        self.get_logger().info(
+            f'Kill!'
+        )
+        try:
+            self._cf.supervisor.send_emergency_stop()
+            response.success = True
+            response.message = ''
+        except Exception as exc:
+            self.get_logger().error(f'land failed: {exc}')
+            response.success = False
+            response.message = str(exc)
+        return response
+
+
     def _land_cb(
         self, request: Land.Request, response: Land.Response
     ) -> Land.Response:
@@ -569,6 +594,38 @@ class CrazyBridge(Node):
             response.message = ''
         except Exception as exc:
             self.get_logger().error(f'go_to failed: {exc}')
+            response.success = False
+            response.message = str(exc)
+        return response
+
+    def _spiral_cb(
+        self, request: Spiral.Request, response: Spiral.Response
+    ) -> Spiral.Response:
+        duration = self._duration_to_seconds(request.duration)
+        # As with go_to, the interface specifies the spiral angle in degrees;
+        # cflib's high_level_commander.spiral expects radians.
+        angle_rad = math.radians(float(request.angle))
+        self.get_logger().info(
+            f'spiral angle={request.angle:.2f}deg r0={request.r0:.2f} '
+            f'rf={request.rf:.2f} ascent={request.ascent:.2f} '
+            f'duration={duration:.2f}s sideways={request.sideways} '
+            f'clockwise={request.clockwise} group_mask={request.group_mask}'
+        )
+        try:
+            self._cf.high_level_commander.spiral(
+                angle_rad,
+                float(request.r0),
+                float(request.rf),
+                float(request.ascent),
+                duration,
+                sideways=bool(request.sideways),
+                clockwise=bool(request.clockwise),
+                group_mask=int(request.group_mask),
+            )
+            response.success = True
+            response.message = ''
+        except Exception as exc:
+            self.get_logger().error(f'spiral failed: {exc}')
             response.success = False
             response.message = str(exc)
         return response
